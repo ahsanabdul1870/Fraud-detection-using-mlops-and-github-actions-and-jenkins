@@ -49,3 +49,34 @@ The concurrent execution yielded the following durations for each pipeline run:
 - **Baseline-SVM**: 9m 17s
 
 By utilizing Kubeflow's Kubernetes/Argo orchestration backbone, the individual pipeline pods (`data-ingestion`, `model-training`, etc.) were dynamically scheduled across the cluster in parallel. Instead of executing sequentially (which would have taken nearly 58 minutes total), the cluster utilized available compute resources to process the pipelines concurrently. This drastically increased execution efficiency and minimized the total wall-clock time for the experiment suite. KFP successfully managed the execution states, tracked artifacts, and cleanly separated the runs under distinct Experiment umbrellas for rapid side-by-side comparison.
+
+## 7. Setup & Execution Instructions
+
+### Running the Pipeline
+To execute the code and compile the Kubeflow pipeline locally, follow these steps:
+
+1. **Set up the virtual environment:**
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Run the pipeline script:**
+   ```bash
+   python i221870_pipeline.py
+   ```
+   *This will generate the `breast_cancer_pipeline_v1.yaml` file, which can be uploaded to your Kubeflow cluster UI.*
+
+### Pushing to GitHub
+To push any future changes or updates to your GitHub repository, run the following commands in your terminal:
+
+```bash
+git add .
+git commit -m "Update assignment files"
+git push origin main
+```
