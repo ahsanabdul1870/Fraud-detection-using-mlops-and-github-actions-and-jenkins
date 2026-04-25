@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'fraud_api'
+    metrics_path: '/metrics'
+    static_configs:
+      # 172.17.0.1 is the default Docker bridge IP. 
+      # This allows Prometheus inside the container to reach your FastAPI app running on your host machine.
+      - targets: ['172.17.0.1:8000']

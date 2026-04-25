@@ -1,0 +1,21 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir fastapi==0.110.0 uvicorn==0.27.1 httpx==0.27.0 pydantic==2.6.3
+
+# Copy source code
+COPY src/ /app/src/
+
+# Create directory for artifacts
+RUN mkdir -p /root/Videos/mlops/assignment3/fraud-artifacts
+ENV OUTPUT_PATH="/root/Videos/mlops/assignment3/fraud-artifacts"
+
+# Expose port for FastAPI
+EXPOSE 8000
+
+# Start server
+CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]

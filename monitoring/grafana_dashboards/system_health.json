@@ -1,0 +1,51 @@
+{
+  "title": "System Health Dashboard",
+  "panels": [
+    {
+      "title": "API Request Rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(api_requests_total[1m])",
+          "legendFormat": "{{endpoint}} - {{status}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "title": "Average API Latency",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(api_request_latency_seconds_sum[1m]) / rate(api_request_latency_seconds_count[1m])",
+          "legendFormat": "{{endpoint}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "title": "Data Drift Alert Status",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "data_drift_alert"
+        }
+      ],
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "title": "Fraud Detection Rate",
+      "type": "gauge",
+      "targets": [
+        {
+          "expr": "rate(model_predictions_total{prediction_class='fraud'}[5m]) / rate(model_predictions_total[5m])"
+        }
+      ],
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 }
+    }
+  ]
+}

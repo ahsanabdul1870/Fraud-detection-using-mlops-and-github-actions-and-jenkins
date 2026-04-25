@@ -1,0 +1,982 @@
+# PIPELINE DEFINITION
+# Name: fraud-detection-pipeline
+# Description: IEEE-CIS fraud detection: Ingest → Validate → Preprocess → Features → Train (XGBoost + LightGBM + Hybrid) → Evaluate → Deploy
+# Inputs:
+#    artifacts_path: str [Default: '/mnt/fraud-artifacts']
+#    auc_threshold: float [Default: 0.9]
+#    data_path: str [Default: '/mnt/data']
+#    recall_threshold: float [Default: 0.8]
+#    xgb_sample_frac: float [Default: 0.5]
+# Outputs:
+#    model-evaluation-metrics: system.Metrics
+components:
+  comp-conditional-deploy:
+    executorLabel: exec-conditional-deploy
+    inputDefinitions:
+      parameters:
+        auc_roc:
+          parameterType: NUMBER_DOUBLE
+        auc_threshold:
+          defaultValue: 0.9
+          isOptional: true
+          parameterType: NUMBER_DOUBLE
+        recall:
+          parameterType: NUMBER_DOUBLE
+        recall_threshold:
+          defaultValue: 0.8
+          isOptional: true
+          parameterType: NUMBER_DOUBLE
+  comp-data-ingestion:
+    executorLabel: exec-data-ingestion
+    inputDefinitions:
+      parameters:
+        data_path:
+          parameterType: STRING
+    outputDefinitions:
+      artifacts:
+        output_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+  comp-data-preprocessing:
+    executorLabel: exec-data-preprocessing
+    inputDefinitions:
+      artifacts:
+        input_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+      parameters:
+        artifacts_path:
+          parameterType: STRING
+        is_train:
+          defaultValue: true
+          isOptional: true
+          parameterType: BOOLEAN
+    outputDefinitions:
+      artifacts:
+        output_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+  comp-data-validation:
+    executorLabel: exec-data-validation
+    inputDefinitions:
+      artifacts:
+        input_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: BOOLEAN
+  comp-feature-engineering:
+    executorLabel: exec-feature-engineering
+    inputDefinitions:
+      artifacts:
+        input_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+      parameters:
+        artifacts_path:
+          parameterType: STRING
+        is_train:
+          defaultValue: true
+          isOptional: true
+          parameterType: BOOLEAN
+    outputDefinitions:
+      artifacts:
+        output_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+  comp-model-evaluation:
+    executorLabel: exec-model-evaluation
+    inputDefinitions:
+      artifacts:
+        input_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        input_model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+    outputDefinitions:
+      artifacts:
+        metrics:
+          artifactType:
+            schemaTitle: system.Metrics
+            schemaVersion: 0.0.1
+      parameters:
+        auc_roc:
+          parameterType: NUMBER_DOUBLE
+        recall:
+          parameterType: NUMBER_DOUBLE
+  comp-model-training:
+    executorLabel: exec-model-training
+    inputDefinitions:
+      artifacts:
+        input_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+      parameters:
+        artifacts_path:
+          parameterType: STRING
+        max_rows:
+          defaultValue: 120000.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        neg_to_pos_ratio:
+          defaultValue: 4.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        xgb_sample_frac:
+          defaultValue: 0.05
+          isOptional: true
+          parameterType: NUMBER_DOUBLE
+    outputDefinitions:
+      artifacts:
+        output_model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+deploymentSpec:
+  executors:
+    exec-conditional-deploy:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - conditional_deploy
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.7.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef conditional_deploy(\n    auc_roc:        float,\n    recall:\
+          \         float,\n    auc_threshold:  float = 0.90,\n    recall_threshold:\
+          \ float = 0.80,\n):\n    \"\"\"\n    Deploy only if BOTH AUC-ROC and Recall\
+          \ meet thresholds.\n    Recall gate is critical \u2014 a high AUC with low\
+          \ recall still\n    misses too much fraud for a production system.\n   \
+          \ \"\"\"\n    auc_ok    = auc_roc >= auc_threshold\n    recall_ok = recall\
+          \  >= recall_threshold\n\n    print(f\"AUC-ROC : {auc_roc:.4f}  (threshold={auc_threshold})\
+          \ \u2192 {'PASS' if auc_ok else 'FAIL'}\")\n    print(f\"Recall  : {recall:.4f}\
+          \   (threshold={recall_threshold}) \u2192 {'PASS' if recall_ok else 'FAIL'}\"\
+          )\n\n    if auc_ok and recall_ok:\n        print(\"Both thresholds passed\
+          \ \u2014 DEPLOYING model\")\n    else:\n        print(\"Threshold(s) not\
+          \ met \u2014 skipping deployment\")\n\n"
+        image: python:3.10
+    exec-data-ingestion:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - data_ingestion
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.7.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.2'\
+          \ 'numpy==1.26.4' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef data_ingestion(data_path: str, output_data: Output[Dataset]):\n\
+          \    import pandas as pd\n    import numpy as np\n\n    def reduce_mem(df):\n\
+          \        for c in df.select_dtypes(include=np.number).columns:\n       \
+          \     if df[c].dtype == \"float64\":\n                df[c] = df[c].astype(np.float32)\n\
+          \        return df\n\n    tx_path = f\"{data_path}/train_transaction.csv\"\
+          \n    id_path = f\"{data_path}/train_identity.csv\"\n\n    # Keep identity\
+          \ data in memory once, then stream transactions in chunks\n    # to avoid\
+          \ a full-frame merge that can exceed pod memory limits.\n    id_df = reduce_mem(pd.read_csv(id_path))\n\
+          \    id_df = id_df.set_index(\"TransactionID\")\n\n    total_rows = 0\n\
+          \    output_cols = None\n    first_chunk = True\n\n    for tx_chunk in pd.read_csv(tx_path,\
+          \ chunksize=100_000):\n        tx_chunk = reduce_mem(tx_chunk)\n       \
+          \ merged = tx_chunk.join(id_df, on=\"TransactionID\", how=\"left\")\n  \
+          \      merged = reduce_mem(merged)\n\n        total_rows += len(merged)\n\
+          \        output_cols = merged.shape[1]\n        merged.to_csv(output_data.path,\
+          \ mode=\"w\" if first_chunk else \"a\", header=first_chunk, index=False)\n\
+          \        first_chunk = False\n\n    print(f\"Ingested {total_rows:,} rows\
+          \ | shape=({total_rows}, {output_cols})\")\n\n"
+        image: python:3.10
+        resources:
+          memoryLimit: 2.0
+    exec-data-preprocessing:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - data_preprocessing
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.7.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.2'\
+          \ 'numpy==1.26.4' 'scikit-learn==1.4.2' 'joblib==1.4.2' && \"$0\" \"$@\"\
+          \n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef data_preprocessing(\n    input_data: Input[Dataset],\n    output_data:\
+          \ Output[Dataset],\n    artifacts_path: str,\n    is_train: bool = True,\n\
+          ):\n    import pandas as pd\n    import numpy as np\n    import joblib,\
+          \ os, gc\n    from sklearn.preprocessing import LabelEncoder\n\n    os.makedirs(artifacts_path,\
+          \ exist_ok=True)\n\n    HIGH_CARD  = [\"card1\",\"card2\",\"card3\",\"card5\"\
+          ,\"addr1\",\"addr2\",\n                  \"P_emaildomain\",\"R_emaildomain\"\
+          ]\n    DROP_THR, FLAG_THR = 0.5, 0.3\n\n    # \u2500\u2500 FIX 1: Read in\
+          \ chunks to avoid OOMKill \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\n    # Read just the header first to\
+          \ determine dtypes cheaply\n    sample = pd.read_csv(input_data.path, nrows=0)\n\
+          \    float64_cols = [c for c in sample.columns]  # will cast after read\n\
+          \n    chunks = []\n    for chunk in pd.read_csv(input_data.path, chunksize=50_000):\n\
+          \        for c in chunk.select_dtypes(\"float64\").columns:\n          \
+          \  chunk[c] = chunk[c].astype(np.float32)\n        chunks.append(chunk)\n\
+          \    df = pd.concat(chunks, axis=0, ignore_index=True)\n    del chunks;\
+          \ gc.collect()\n\n    # \u2500\u2500 Drop high-missing columns \u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\n    if is_train:\n        rates = df.isnull().mean()\n   \
+          \     drop  = [c for c in rates[rates > DROP_THR].index\n              \
+          \   if c not in (\"isFraud\", \"TransactionID\")]\n        joblib.dump(drop,\
+          \ f\"{artifacts_path}/drop_cols.pkl\")\n    else:\n        drop = [c for\
+          \ c in joblib.load(f\"{artifacts_path}/drop_cols.pkl\")\n              \
+          \  if c in df.columns]\n    df.drop(columns=drop, inplace=True)\n\n    num_cols\
+          \ = [c for c in df.select_dtypes(np.number).columns\n                if\
+          \ c not in (\"isFraud\", \"TransactionID\")]\n    cat_cols = df.select_dtypes(\"\
+          object\").columns.tolist()\n\n    # \u2500\u2500 Missing flags \u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\n    if is_train:\n        flag_cols = df[num_cols].isnull().mean()\n\
+          \        flag_cols = flag_cols[flag_cols > FLAG_THR].index.tolist()\n  \
+          \      joblib.dump(flag_cols, f\"{artifacts_path}/flag_cols.pkl\")\n   \
+          \ else:\n        flag_cols = [c for c in joblib.load(f\"{artifacts_path}/flag_cols.pkl\"\
+          )\n                     if c in df.columns]\n\n    # \u2500\u2500 FIX 2:\
+          \ Build all new columns first, concat ONCE \u2500\u2500\u2500\u2500\u2500\
+          \n    new_flag_cols = {}\n    if flag_cols:\n        for c in flag_cols:\n\
+          \            new_flag_cols[f\"{c}_was_missing\"] = df[c].isnull().astype(np.uint8)\n\
+          \n    # \u2500\u2500 Median imputation \u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\n    if is_train:\n        meds = df[num_cols].median()\n\
+          \        joblib.dump(meds, f\"{artifacts_path}/medians.pkl\")\n    else:\n\
+          \        meds     = joblib.load(f\"{artifacts_path}/medians.pkl\")\n   \
+          \     num_cols = [c for c in num_cols if c in meds.index]\n\n    df[num_cols]\
+          \ = df[num_cols].fillna(meds[num_cols])\n    df[cat_cols] = df[cat_cols].fillna(\"\
+          UNKNOWN\")\n\n    # \u2500\u2500 Target encoding \u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    new_enc_cols\
+          \ = {}\n    if is_train:\n        enc_maps, gmean = {}, df[\"isFraud\"].mean()\n\
+          \        for col in HIGH_CARD:\n            if col not in df.columns: continue\n\
+          \            m = df.groupby(col)[\"isFraud\"].mean()\n            enc_maps[col]\
+          \ = m.to_dict()\n            new_enc_cols[f\"{col}_enc\"] = df[col].map(m).fillna(gmean).astype(np.float32)\n\
+          \        joblib.dump(enc_maps, f\"{artifacts_path}/encoding_maps.pkl\")\n\
+          \        joblib.dump(gmean,    f\"{artifacts_path}/global_mean.pkl\")\n\
+          \    else:\n        enc_maps = joblib.load(f\"{artifacts_path}/encoding_maps.pkl\"\
+          )\n        gmean    = joblib.load(f\"{artifacts_path}/global_mean.pkl\"\
+          )\n        for col in HIGH_CARD:\n            if col not in df.columns:\
+          \ continue\n            new_enc_cols[f\"{col}_enc\"] = (df[col].map(enc_maps.get(col,\
+          \ {})))\n\n    # \u2500\u2500 FIX 2 cont: Single concat for all new columns\
+          \ \u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    all_new = {**new_flag_cols,\
+          \ **new_enc_cols}\n    if all_new:\n        df = pd.concat([df, pd.DataFrame(all_new,\
+          \ index=df.index)], axis=1)\n        del all_new; gc.collect()\n\n    df.drop(columns=[c\
+          \ for c in HIGH_CARD if c in df.columns], inplace=True)\n\n    # \u2500\u2500\
+          \ Label encoding \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\n    cat_cols = [c for c in df.select_dtypes(\"\
+          object\").columns\n                if c != \"TransactionID\"]\n    if is_train:\n\
+          \        encoders = {}\n        for col in cat_cols:\n            le = LabelEncoder()\n\
+          \            df[col] = le.fit_transform(df[col].astype(str))\n         \
+          \   encoders[col] = le\n        joblib.dump(encoders,  f\"{artifacts_path}/label_encoders.pkl\"\
+          )\n        joblib.dump(cat_cols,  f\"{artifacts_path}/label_encoder_cols.pkl\"\
+          )\n        feat_cols = [c for c in df.columns if c != \"isFraud\"]\n   \
+          \     joblib.dump(feat_cols, f\"{artifacts_path}/train_feature_cols.pkl\"\
+          )\n    else:\n        encoders  = joblib.load(f\"{artifacts_path}/label_encoders.pkl\"\
+          )\n        saved_cat = joblib.load(f\"{artifacts_path}/label_encoder_cols.pkl\"\
+          )\n        for col in [c for c in saved_cat if c in df.columns]:\n     \
+          \       le = encoders[col]\n            df[col] = df[col].astype(str).apply(\n\
+          \                lambda x, le=le: int(le.transform([x])[0]) if x in le.classes_\
+          \ else -1)\n        train_cols = joblib.load(f\"{artifacts_path}/train_feature_cols.pkl\"\
+          )\n        for c in train_cols:\n            if c not in df.columns: df[c]\
+          \ = 0\n        df = df[[c for c in train_cols if c in df.columns]]\n\n \
+          \   gc.collect()\n    df.to_csv(output_data.path, index=False)\n    print(f\"\
+          Preprocessed shape: {df.shape}\")\n\n"
+        image: python:3.10
+        resources:
+          memoryLimit: 4.0
+    exec-data-validation:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - data_validation
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.7.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.2'\
+          \ && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef data_validation(input_data: Input[Dataset]) -> bool:\n    import\
+          \ pandas as pd\n    df = pd.read_csv(input_data.path, nrows=5000)  # sample\
+          \ for speed\n\n    checks = {\n        \"has_isFraud\":        \"isFraud\"\
+          \ in df.columns,\n        \"has_TransactionID\":  \"TransactionID\" in df.columns,\n\
+          \        \"has_TransactionAmt\": \"TransactionAmt\" in df.columns,\n   \
+          \     \"no_negative_amt\":    df[\"TransactionAmt\"].min() > 0,\n      \
+          \  \"fraud_col_binary\":   df[\"isFraud\"].isin([0, 1]).all(),\n    }\n\
+          \    for name, result in checks.items():\n        status = \"PASS\" if result\
+          \ else \"FAIL\"\n        print(f\"  [{status}] {name}\")\n\n    assert all(checks.values()),\
+          \ \"Validation failed \u2014 see above\"\n    print(\"All validation checks\
+          \ passed\")\n    return True\n\n"
+        image: python:3.10
+    exec-feature-engineering:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - feature_engineering
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.7.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.2'\
+          \ 'numpy==1.26.4' 'joblib==1.4.2' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef feature_engineering(\n    input_data: Input[Dataset],\n    output_data:\
+          \ Output[Dataset],\n    artifacts_path: str,\n    is_train: bool = True,\n\
+          ):\n    import pandas as pd\n    import numpy as np\n    import joblib,\
+          \ gc, os\n\n    os.makedirs(artifacts_path, exist_ok=True)\n\n    # \u2500\
+          \u2500 Pre-compute frequency maps (single lightweight pass) \u2500\n   \
+          \ # Must be done before the chunk loop since value_counts\n    # needs the\
+          \ full column to be accurate.\n    freq_cols = [\"card4\", \"card6\"]\n\
+          \    header_cols = pd.read_csv(input_data.path, nrows=0).columns.tolist()\n\
+          \    present_freq_cols = [c for c in freq_cols if c in header_cols]\n\n\
+          \    if is_train:\n        freq_maps = {}\n        for col in present_freq_cols:\n\
+          \            series = pd.read_csv(input_data.path, usecols=[col])[col]\n\
+          \            freq_maps[col] = series.value_counts(normalize=True).to_dict()\n\
+          \            del series; gc.collect()\n        joblib.dump(freq_maps, f\"\
+          {artifacts_path}/freq_maps.pkl\")\n    else:\n        if os.path.exists(f\"\
+          {artifacts_path}/freq_maps.pkl\"):\n            freq_maps = joblib.load(f\"\
+          {artifacts_path}/freq_maps.pkl\")\n        else:\n            freq_maps\
+          \ = {}\n\n    # \u2500\u2500 Chunked feature engineering \u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n   \
+          \ first_chunk = True\n    total_rows  = 0\n\n    for chunk in pd.read_csv(input_data.path,\
+          \ chunksize=50_000):\n\n        # Cast float64 \u2192 float32 immediately\
+          \ to save RAM\n        for c in chunk.select_dtypes(\"float64\").columns:\n\
+          \            chunk[c] = chunk[c].astype(np.float32)\n\n        # \u2500\u2500\
+          \ Time features \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\n        if \"TransactionDT\" in chunk.columns:\n   \
+          \         dt = chunk[\"TransactionDT\"].values.astype(np.float32)\n    \
+          \        h  = (dt % 86400  / 3600).astype(np.float32)\n            d  =\
+          \ (dt % 604800 / 86400).astype(np.float32)\n            chunk[\"hour_of_day\"\
+          ] = h\n            chunk[\"day_of_week\"] = d\n            chunk[\"hour_sin\"\
+          ]    = np.sin(2 * np.pi * h / 24).astype(np.float32)\n            chunk[\"\
+          hour_cos\"]    = np.cos(2 * np.pi * h / 24).astype(np.float32)\n       \
+          \     chunk[\"day_sin\"]     = np.sin(2 * np.pi * d / 7).astype(np.float32)\n\
+          \            chunk[\"day_cos\"]     = np.cos(2 * np.pi * d / 7).astype(np.float32)\n\
+          \            del dt, h, d\n\n        # \u2500\u2500 Amount features \u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n        if\
+          \ \"TransactionAmt\" in chunk.columns:\n            amt = chunk[\"TransactionAmt\"\
+          ].values.astype(np.float32)\n            chunk[\"TransactionAmt_log\"] =\
+          \ np.log1p(amt).astype(np.float32)\n            chunk[\"TransactionAmt_bucket\"\
+          ] = pd.cut(\n                chunk[\"TransactionAmt\"],\n              \
+          \  bins=[0, 50, 200, 500, 2000, np.inf],\n                labels=[0, 1,\
+          \ 2, 3, 4]\n            ).astype(np.float32).values\n            del amt\n\
+          \n        # \u2500\u2500 Frequency encoding \u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\n        for col in present_freq_cols:\n            if\
+          \ col in freq_maps:\n                chunk[f\"{col}_freq\"] = (chunk[col]\n\
+          \                                        .map(freq_maps[col])\n        \
+          \                                .fillna(0)\n                          \
+          \              .astype(np.float32))\n\n        # \u2500\u2500 Interaction\
+          \ feature \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n        if \"TransactionAmt_log\"\
+          \ in chunk.columns and \"card1_enc\" in chunk.columns:\n            chunk[\"\
+          amt_x_card1\"] = (chunk[\"TransactionAmt_log\"].values *\n             \
+          \                       chunk[\"card1_enc\"].values).astype(np.float32)\n\
+          \n        # \u2500\u2500 D-column aggregates \u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\n        d_cols = [c for c in chunk.columns if c.startswith(\"\
+          D\") and c[1:].isdigit()]\n        if len(d_cols) >= 2:\n            d_mat\
+          \ = chunk[d_cols].values.astype(np.float32)\n            chunk[\"D_mean\"\
+          ] = np.nanmean(d_mat, axis=1).astype(np.float32)\n            chunk[\"D_std\"\
+          ]  = np.nanstd(d_mat,  axis=1).astype(np.float32)\n            chunk[\"\
+          D_max\"]  = np.nanmax(d_mat,  axis=1).astype(np.float32)\n            del\
+          \ d_mat\n\n        # \u2500\u2500 C-column aggregates \u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\n        c_cols = [c for c in chunk.columns if\
+          \ c.startswith(\"C\") and c[1:].isdigit()]\n        if len(c_cols) >= 2:\n\
+          \            c_mat = chunk[c_cols].values.astype(np.float32)\n         \
+          \   chunk[\"C_sum\"]  = np.nansum(c_mat,  axis=1).astype(np.float32)\n \
+          \           chunk[\"C_mean\"] = np.nanmean(c_mat, axis=1).astype(np.float32)\n\
+          \            chunk[\"C_max\"]  = np.nanmax(c_mat,  axis=1).astype(np.float32)\n\
+          \            del c_mat\n\n        # \u2500\u2500 V-column aggregates \u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\n        v_cols = [c for c in chunk.columns\
+          \ if c.startswith(\"V\") and c[1:].isdigit()]\n        if len(v_cols) >=\
+          \ 2:\n            v_mat = chunk[v_cols].values.astype(np.float32)\n    \
+          \        chunk[\"V_mean\"] = np.nanmean(v_mat, axis=1).astype(np.float32)\n\
+          \            chunk[\"V_std\"]  = np.nanstd(v_mat,  axis=1).astype(np.float32)\n\
+          \            del v_mat\n\n        # \u2500\u2500 Drop columns no longer\
+          \ needed \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n        chunk.drop(\n\
+          \            columns=[c for c in [\"TransactionID\", \"TransactionDT\"]\n\
+          \                     if c in chunk.columns],\n            inplace=True\n\
+          \        )\n\n        # \u2500\u2500 Write chunk to output \u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\n        total_rows += len(chunk)\n        chunk.to_csv(\n\
+          \            output_data.path,\n            mode=\"w\" if first_chunk else\
+          \ \"a\",\n            header=first_chunk,\n            index=False\n   \
+          \     )\n        first_chunk = False\n        del chunk; gc.collect()\n\n\
+          \    print(f\"Feature engineering done: {total_rows:,} rows written\")\n\
+          \n"
+        image: python:3.10
+        resources:
+          memoryLimit: 4.0
+    exec-model-evaluation:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - model_evaluation
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.7.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.2'\
+          \ 'lightgbm==4.3.0' 'scikit-learn==1.4.2' 'joblib==1.4.2' && \"$0\" \"$@\"\
+          \n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef model_evaluation(\n    input_data:  Input[Dataset],\n    input_model:\
+          \ Input[Model],\n    metrics:     Output[Metrics],\n) -> NamedTuple(\"EvalOutputs\"\
+          , [(\"auc_roc\", float), (\"recall\", float)]):  # type: ignore[valid-type]\n\
+          \    import pandas as pd, numpy as np, joblib\n    from sklearn.metrics\
+          \ import (roc_auc_score, recall_score,\n                               \
+          \  precision_score, f1_score, confusion_matrix)\n    from collections import\
+          \ namedtuple\n\n    model = joblib.load(input_model.path)\n\n    # Predict\
+          \ in chunks to avoid loading the full engineered dataset into RAM.\n   \
+          \ y_parts = []\n    proba_parts = []\n    preds_parts = []\n    for chunk\
+          \ in pd.read_csv(input_data.path, chunksize=50_000):\n        y_chunk =\
+          \ chunk[\"isFraud\"].to_numpy(dtype=np.int8)\n        X_chunk = chunk.drop(columns=[\"\
+          isFraud\"]).select_dtypes(include=\"number\")\n        proba_chunk = model.predict(X_chunk)\n\
+          \        preds_chunk = (proba_chunk > 0.5).astype(np.int8)\n\n        y_parts.append(y_chunk)\n\
+          \        proba_parts.append(proba_chunk)\n        preds_parts.append(preds_chunk)\n\
+          \n    y = np.concatenate(y_parts)\n    proba = np.concatenate(proba_parts)\n\
+          \    preds = np.concatenate(preds_parts)\n\n    auc       = roc_auc_score(y,\
+          \ proba)\n    recall    = recall_score(y, preds, zero_division=0)\n    precision\
+          \ = precision_score(y, preds, zero_division=0)\n    f1        = f1_score(y,\
+          \ preds, zero_division=0)\n    cm        = confusion_matrix(y, preds)\n\
+          \    tn, fp, fn, tp = cm.ravel()\n    cost = int(fn * 100 + fp * 10)\n\n\
+          \    metrics.log_metric(\"auc_roc\",       float(auc))\n    metrics.log_metric(\"\
+          recall\",        float(recall))\n    metrics.log_metric(\"precision\", \
+          \    float(precision))\n    metrics.log_metric(\"f1\",            float(f1))\n\
+          \    metrics.log_metric(\"business_cost\", float(cost))\n    metrics.log_metric(\"\
+          TP\", int(tp)); metrics.log_metric(\"FP\", int(fp))\n    metrics.log_metric(\"\
+          FN\", int(fn)); metrics.log_metric(\"TN\", int(tn))\n\n    print(f\"AUC={auc:.4f}\
+          \ | Recall={recall:.4f} | F1={f1:.4f} | Cost=${cost:,}\")\n    print(f\"\
+          Confusion: TN={tn} FP={fp} | FN={fn} TP={tp}\")\n\n    EvalOutputs = namedtuple(\"\
+          EvalOutputs\", [\"auc_roc\", \"recall\"])\n    return EvalOutputs(auc_roc=float(auc),\
+          \ recall=float(recall))\n\n"
+        image: python:3.10
+        resources:
+          memoryLimit: 2.0
+    exec-model-training:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - model_training
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.7.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.2'\
+          \ 'numpy==1.26.4' 'scikit-learn==1.4.2' 'lightgbm==4.3.0' 'xgboost==2.0.3'\
+          \ 'joblib==1.4.2' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef model_training(\n    input_data:      Input[Dataset],\n    output_model:\
+          \    Output[Model],\n    artifacts_path:  str,\n    xgb_sample_frac: float\
+          \ = 0.05,  # 0.05 \u2248 30k rows \u2192 XGB peak ~150 MB\n    max_rows:\
+          \        int = 120_000,\n    neg_to_pos_ratio: int = 4,\n):\n    import\
+          \ pandas as pd, numpy as np, joblib, gc, os, tempfile, shutil\n    from\
+          \ sklearn.model_selection import train_test_split\n\n    os.makedirs(artifacts_path,\
+          \ exist_ok=True)\n\n    # \u2500\u2500 A: Infer dtypes from a tiny sample\
+          \ \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    print(\"[1/7] Inferring\
+          \ dtypes...\", flush=True)\n    sample = pd.read_csv(input_data.path, nrows=100)\n\
+          \    dtype_dict = {c: np.float32 for c in sample.select_dtypes(\"float64\"\
+          ).columns}\n    if \"isFraud\" in sample.columns:\n        dtype_dict[\"\
+          isFraud\"] = np.int8\n    del sample\n\n    # \u2500\u2500 B: First pass\
+          \ only reads target column for class stats \u2500\n    print(\"[2/7] Counting\
+          \ classes with a lightweight pass...\", flush=True)\n    pos_total = 0\n\
+          \    neg_total = 0\n    for y_chunk in pd.read_csv(input_data.path, usecols=[\"\
+          isFraud\"], chunksize=200_000):\n        vals = y_chunk[\"isFraud\"].values\n\
+          \        pos_total += int((vals == 1).sum())\n        neg_total += int((vals\
+          \ == 0).sum())\n\n    if pos_total == 0:\n        raise ValueError(\"No\
+          \ positive class rows found in training data.\")\n\n    target_total = max(20_000,\
+          \ int(max_rows))\n    if pos_total >= target_total:\n        # Degenerate\
+          \ case: positives alone exceed cap, so downsample positives only.\n    \
+          \    target_neg = 0\n        pos_keep_prob = min(1.0, float(target_total)\
+          \ / float(max(1, pos_total)))\n        neg_keep_prob = 0.0\n    else:\n\
+          \        target_neg = min(neg_total, max(1, target_total - pos_total), int(pos_total\
+          \ * max(1, neg_to_pos_ratio)))\n        pos_keep_prob = 1.0\n        neg_keep_prob\
+          \ = min(1.0, float(target_neg) / float(max(1, neg_total)))\n    print(\n\
+          \        f\"  class counts: pos={pos_total:,}, neg={neg_total:,} | target_neg={target_neg:,}\
+          \ | pos_keep_prob={pos_keep_prob:.4f} | neg_keep_prob={neg_keep_prob:.4f}\"\
+          ,\n        flush=True,\n    )\n\n    # \u2500\u2500 C: Stream sampled rows\
+          \ to disk (no list+concat RAM spikes) \u2500\n    print(\"[3/7] Sampling\
+          \ rows in chunks to cap memory...\", flush=True)\n    sample_dir = tempfile.mkdtemp(prefix=\"\
+          fraud_sample_\")\n    sampled_csv = f\"{sample_dir}/sampled.csv\"\n    wrote_header\
+          \ = False\n\n    for chunk in pd.read_csv(input_data.path, dtype=dtype_dict,\
+          \ chunksize=50_000):\n        pos = chunk[chunk[\"isFraud\"] == 1]\n   \
+          \     neg = chunk[chunk[\"isFraud\"] == 0]\n\n        if pos_keep_prob <\
+          \ 1.0 and len(pos) > 0:\n            pos = pos.sample(frac=pos_keep_prob,\
+          \ random_state=42)\n\n        if neg_keep_prob < 1.0 and len(neg) > 0:\n\
+          \            neg = neg.sample(frac=neg_keep_prob, random_state=42)\n\n \
+          \       sampled_chunk = pd.concat([pos, neg], axis=0, ignore_index=True)\n\
+          \        if len(sampled_chunk) > 0:\n            sampled_chunk.to_csv(\n\
+          \                sampled_csv,\n                mode=\"w\" if not wrote_header\
+          \ else \"a\",\n                header=not wrote_header,\n              \
+          \  index=False,\n            )\n            wrote_header = True\n      \
+          \  del pos, neg, sampled_chunk, chunk\n        gc.collect()\n\n    if not\
+          \ wrote_header:\n        shutil.rmtree(sample_dir, ignore_errors=True)\n\
+          \        raise ValueError(\"Sampling produced no rows; adjust max_rows/neg_to_pos_ratio.\"\
+          )\n\n    df = pd.read_csv(sampled_csv, dtype=dtype_dict)\n    shutil.rmtree(sample_dir,\
+          \ ignore_errors=True)\n    gc.collect()\n\n    if len(df) > target_total:\n\
+          \        # Final cap to avoid accidental growth after per-chunk sampling.\n\
+          \        df = df.sample(n=target_total, random_state=42, replace=False)\n\
+          \n    if df[\"isFraud\"].nunique() < 2:\n        raise ValueError(\"Sampled\
+          \ frame lost class diversity; adjust max_rows/neg_to_pos_ratio.\")\n\n \
+          \   print(f\"  sampled rows: {len(df):,}\", flush=True)\n\n    y       \
+          \     = df[\"isFraud\"].values.astype(np.int8)\n    X            = df.drop(columns=[\"\
+          isFraud\"]).values.astype(np.float32)\n    feature_names = [c for c in df.columns\
+          \ if c != \"isFraud\"]\n    del df; gc.collect()\n\n    # \u2500\u2500 D:\
+          \ Stratified split \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\n    print(\"[4/7] Splitting data...\", flush=True)\n    X_tr, X_te,\
+          \ y_tr, y_te = train_test_split(\n        X, y, test_size=0.2, random_state=42,\
+          \ stratify=y\n    )\n    ratio = float((y_tr == 0).sum()) / float(max(1,\
+          \ (y_tr == 1).sum()))\n    del X, y; gc.collect()\n\n    # \u2500\u2500\
+          \ E: Spill splits to temp .npy files, free all RAM \u2500\u2500\u2500\u2500\
+          \n    # This is the key trick: only ONE model's data lives in RAM at a time.\n\
+          \    print(\"[5/7] Spilling splits to disk to free RAM before training...\"\
+          , flush=True)\n    tmp_dir = tempfile.mkdtemp(prefix=\"fraud_train_\")\n\
+          \    np.save(f\"{tmp_dir}/X_tr.npy\", X_tr)\n    np.save(f\"{tmp_dir}/X_te.npy\"\
+          , X_te)\n    np.save(f\"{tmp_dir}/y_tr.npy\", y_tr)\n    np.save(f\"{tmp_dir}/y_te.npy\"\
+          , y_te)\n    del X_tr, X_te, y_tr, y_te; gc.collect()\n    print(f\"  Spilled\
+          \ to {tmp_dir}  (RAM now ~free)\")\n\n    # \u2500\u2500 F: PHASE 1 \u2014\
+          \ XGBoost (isolated memory scope) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\n    print(\"[6/7] Training XGBoost  (sequential phase 1)...\", flush=True)\n\
+          \    def _train_xgb():\n        import xgboost as xgb\n\n        # mmap_mode='r':\
+          \ arrays stay on disk; OS pages in only what's touched.\n        # We copy\
+          \ ONLY the small sample + test set into contiguous RAM.\n        X_tr_mm\
+          \ = np.load(f\"{tmp_dir}/X_tr.npy\", mmap_mode='r')\n        y_tr_mm = np.load(f\"\
+          {tmp_dir}/y_tr.npy\", mmap_mode='r')\n        X_te_mm = np.load(f\"{tmp_dir}/X_te.npy\"\
+          , mmap_mode='r')\n        y_te_mm = np.load(f\"{tmp_dir}/y_te.npy\", mmap_mode='r')\n\
+          \n        rng = np.random.default_rng(42)\n        xgb_n = int(len(X_tr_mm)\
+          \ * xgb_sample_frac)\n        xgb_n = min(len(X_tr_mm), max(5_000, xgb_n))\n\
+          \        idx = rng.choice(len(X_tr_mm), xgb_n, replace=False)\n\n      \
+          \  # Materialise only the tiny sample + test into RAM, then drop mmaps\n\
+          \        X_samp = np.ascontiguousarray(X_tr_mm[idx], dtype=np.float32)\n\
+          \        y_samp = np.ascontiguousarray(y_tr_mm[idx], dtype=np.float32)\n\
+          \        X_te_c = np.ascontiguousarray(X_te_mm,      dtype=np.float32)\n\
+          \        y_te_c = np.ascontiguousarray(y_te_mm,      dtype=np.float32)\n\
+          \        del X_tr_mm, y_tr_mm, X_te_mm, y_te_mm, idx; gc.collect()\n\n \
+          \       dtrain = xgb.DMatrix(X_samp, label=y_samp, feature_names=feature_names)\n\
+          \        dtest  = xgb.DMatrix(X_te_c, label=y_te_c, feature_names=feature_names)\n\
+          \        del X_samp, y_samp, X_te_c, y_te_c; gc.collect()\n\n        model\
+          \ = xgb.train(\n            {\n                \"objective\":        \"\
+          binary:logistic\",\n                \"eval_metric\":      \"aucpr\",\n \
+          \               \"tree_method\":      \"hist\",\n                \"max_bin\"\
+          :          64,\n                \"scale_pos_weight\": ratio * 2,\n     \
+          \           \"learning_rate\":    0.05,\n                \"max_depth\":\
+          \        4,\n                \"nthread\":          2,\n            },\n\
+          \            dtrain, num_boost_round=100,\n            evals=[(dtest, \"\
+          eval\")],\n            early_stopping_rounds=15,\n            verbose_eval=False,\n\
+          \        )\n        joblib.dump(model, f\"{artifacts_path}/xgb_model_cost_sens.pkl\"\
+          )\n        del dtrain, dtest, model; gc.collect()\n        print(\"  XGBoost\
+          \ saved.\", flush=True)\n\n    _train_xgb()          # all XGB objects freed\
+          \ when function returns\n    del _train_xgb; gc.collect()\n\n    # \u2500\
+          \u2500 G: PHASE 2 \u2014 LightGBM (isolated memory scope) \u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\n    print(\"[7/7] Training LightGBM (sequential\
+          \ phase 2)...\", flush=True)\n    def _train_lgb():\n        import lightgbm\
+          \ as lgb\n\n        # mmap_mode='r': pass mmap arrays directly to LGB.\n\
+          \        # LGB reads pages on demand during histogram construction;\n  \
+          \      # free_raw_data=True releases the mmap reference after construct().\n\
+          \        # On a swap-heavy machine the OS will page these in as needed,\n\
+          \        # keeping physical RAM usage to just the LGB histogram structure.\n\
+          \        X_tr_mm = np.load(f\"{tmp_dir}/X_tr.npy\", mmap_mode='r')\n   \
+          \     y_tr_mm = np.load(f\"{tmp_dir}/y_tr.npy\", mmap_mode='r')\n      \
+          \  X_te_mm = np.load(f\"{tmp_dir}/X_te.npy\", mmap_mode='r')\n        y_te_mm\
+          \ = np.load(f\"{tmp_dir}/y_te.npy\", mmap_mode='r')\n\n        lgb_tr =\
+          \ lgb.Dataset(X_tr_mm, label=y_tr_mm,\n                             feature_name=feature_names,\
+          \ free_raw_data=True)\n        lgb_te = lgb.Dataset(X_te_mm, label=y_te_mm,\n\
+          \                             reference=lgb_tr, free_raw_data=True)\n  \
+          \      # Python refs dropped; LGB holds the mmap ref until construct()\n\
+          \        del X_tr_mm, y_tr_mm, X_te_mm, y_te_mm; gc.collect()\n\n      \
+          \  model = lgb.train(\n            {\n                \"objective\":   \
+          \     \"binary\",\n                \"metric\":           \"auc\",\n    \
+          \            \"scale_pos_weight\": ratio * 2,\n                \"learning_rate\"\
+          :    0.05,\n                \"num_leaves\":       15,   # halved: fewer\
+          \ leaves \u2192 smaller histogram\n                \"max_bin\":        \
+          \  63,   # explicit bin cap \u2192 less histogram RAM\n                \"\
+          feature_fraction\": 0.8,\n                \"num_threads\":      2,\n   \
+          \         },\n            lgb_tr, num_boost_round=150,\n            valid_sets=[lgb_te],\n\
+          \            callbacks=[lgb.early_stopping(20), lgb.log_evaluation(-1)],\n\
+          \        )\n        joblib.dump(model, f\"{artifacts_path}/lgb_model_cost_sens.pkl\"\
+          )\n        joblib.dump(model, output_model.path)\n        del lgb_tr, lgb_te,\
+          \ model; gc.collect()\n        print(\"  LightGBM saved (primary output).\"\
+          , flush=True)\n\n    _train_lgb()          # all LGB objects freed when\
+          \ function returns\n    del _train_lgb; gc.collect()\n\n    # \u2500\u2500\
+          \ F: Hybrid (RF + mini-LGB) \u2014 COMMENTED OUT \u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    # Uncomment only when the\
+          \ pod memory_limit exceeds 6 G.\n    # def _train_hybrid():\n    #     X_tr_\
+          \ = np.load(f\"{tmp_dir}/X_tr.npy\")\n    #     y_tr_ = np.load(f\"{tmp_dir}/y_tr.npy\"\
+          )\n    #     from sklearn.ensemble import RandomForestClassifier\n    #\
+          \     rng = np.random.default_rng(0)\n    #     idx = rng.choice(len(X_tr_),\
+          \ int(len(X_tr_) * 0.1), replace=False)\n    #     rf = RandomForestClassifier(n_estimators=30,\
+          \ max_depth=5, n_jobs=2)\n    #     rf.fit(X_tr_[idx], y_tr_[idx])\n   \
+          \ #     top_idx = np.argsort(rf.feature_importances_)[::-1][:20]\n    #\
+          \     top_feats = [feature_names[i] for i in top_idx]\n    #     del rf,\
+          \ idx; gc.collect()\n    #     ds = lgb.Dataset(X_tr_[:, top_idx], label=y_tr_)\n\
+          \    #     hybrid = lgb.train({\"objective\": \"binary\", \"num_leaves\"\
+          : 15,\n    #                         \"num_threads\": 2}, ds, num_boost_round=100)\n\
+          \    #     joblib.dump({\"model\": hybrid, \"features\": top_feats},\n \
+          \   #                 f\"{artifacts_path}/hybrid_model.pkl\")\n    #   \
+          \  del X_tr_, y_tr_, ds, hybrid; gc.collect()\n    #     print(\"  Hybrid\
+          \ saved.\")\n    # _train_hybrid(); del _train_hybrid; gc.collect()\n\n\
+          \    # \u2500\u2500 G: Cleanup temp spill files \u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+          \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    shutil.rmtree(tmp_dir,\
+          \ ignore_errors=True)\n    print(\"Done. All models trained sequentially.\
+          \ Primary: LightGBM.\", flush=True)\n\n"
+        image: python:3.10
+        resources:
+          cpuLimit: 2.0
+          memoryLimit: 2.0
+          memoryRequest: 0.8
+pipelineInfo:
+  description: "IEEE-CIS fraud detection: Ingest \u2192 Validate \u2192 Preprocess\
+    \ \u2192 Features \u2192 Train (XGBoost + LightGBM + Hybrid) \u2192 Evaluate \u2192\
+    \ Deploy"
+  name: fraud-detection-pipeline
+root:
+  dag:
+    outputs:
+      artifacts:
+        model-evaluation-metrics:
+          artifactSelectors:
+          - outputArtifactKey: metrics
+            producerSubtask: model-evaluation
+    tasks:
+      conditional-deploy:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-conditional-deploy
+        dependentTasks:
+        - model-evaluation
+        inputs:
+          parameters:
+            auc_roc:
+              taskOutputParameter:
+                outputParameterKey: auc_roc
+                producerTask: model-evaluation
+            auc_threshold:
+              componentInputParameter: auc_threshold
+            recall:
+              taskOutputParameter:
+                outputParameterKey: recall
+                producerTask: model-evaluation
+            recall_threshold:
+              componentInputParameter: recall_threshold
+        taskInfo:
+          name: conditional-deploy
+      data-ingestion:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-data-ingestion
+        inputs:
+          parameters:
+            data_path:
+              componentInputParameter: data_path
+        retryPolicy:
+          backoffDuration: 0s
+          backoffFactor: 2.0
+          backoffMaxDuration: 3600s
+          maxRetryCount: 3
+        taskInfo:
+          name: data-ingestion
+      data-preprocessing:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-data-preprocessing
+        dependentTasks:
+        - data-ingestion
+        - data-validation
+        inputs:
+          artifacts:
+            input_data:
+              taskOutputArtifact:
+                outputArtifactKey: output_data
+                producerTask: data-ingestion
+          parameters:
+            artifacts_path:
+              componentInputParameter: artifacts_path
+            is_train:
+              runtimeValue:
+                constant: true
+        retryPolicy:
+          backoffDuration: 0s
+          backoffFactor: 2.0
+          backoffMaxDuration: 3600s
+          maxRetryCount: 2
+        taskInfo:
+          name: data-preprocessing
+      data-validation:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-data-validation
+        dependentTasks:
+        - data-ingestion
+        inputs:
+          artifacts:
+            input_data:
+              taskOutputArtifact:
+                outputArtifactKey: output_data
+                producerTask: data-ingestion
+        retryPolicy:
+          backoffDuration: 0s
+          backoffFactor: 2.0
+          backoffMaxDuration: 3600s
+          maxRetryCount: 2
+        taskInfo:
+          name: data-validation
+      feature-engineering:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-feature-engineering
+        dependentTasks:
+        - data-preprocessing
+        inputs:
+          artifacts:
+            input_data:
+              taskOutputArtifact:
+                outputArtifactKey: output_data
+                producerTask: data-preprocessing
+          parameters:
+            artifacts_path:
+              componentInputParameter: artifacts_path
+            is_train:
+              runtimeValue:
+                constant: true
+        taskInfo:
+          name: feature-engineering
+      model-evaluation:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-model-evaluation
+        dependentTasks:
+        - feature-engineering
+        - model-training
+        inputs:
+          artifacts:
+            input_data:
+              taskOutputArtifact:
+                outputArtifactKey: output_data
+                producerTask: feature-engineering
+            input_model:
+              taskOutputArtifact:
+                outputArtifactKey: output_model
+                producerTask: model-training
+        taskInfo:
+          name: model-evaluation
+      model-training:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-model-training
+        dependentTasks:
+        - feature-engineering
+        inputs:
+          artifacts:
+            input_data:
+              taskOutputArtifact:
+                outputArtifactKey: output_data
+                producerTask: feature-engineering
+          parameters:
+            artifacts_path:
+              componentInputParameter: artifacts_path
+            xgb_sample_frac:
+              componentInputParameter: xgb_sample_frac
+        taskInfo:
+          name: model-training
+  inputDefinitions:
+    parameters:
+      artifacts_path:
+        defaultValue: /mnt/fraud-artifacts
+        isOptional: true
+        parameterType: STRING
+      auc_threshold:
+        defaultValue: 0.9
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      data_path:
+        defaultValue: /mnt/data
+        isOptional: true
+        parameterType: STRING
+      recall_threshold:
+        defaultValue: 0.8
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      xgb_sample_frac:
+        defaultValue: 0.5
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+  outputDefinitions:
+    artifacts:
+      model-evaluation-metrics:
+        artifactType:
+          schemaTitle: system.Metrics
+          schemaVersion: 0.0.1
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.7.0
+---
+platforms:
+  kubernetes:
+    deploymentSpec:
+      executors:
+        exec-data-ingestion:
+          pvcMount:
+          - constant: fraud-data-pvc
+            mountPath: /mnt/data
+        exec-data-preprocessing:
+          pvcMount:
+          - constant: fraud-artifacts-pvc
+            mountPath: /mnt/fraud-artifacts
+        exec-feature-engineering:
+          pvcMount:
+          - constant: fraud-artifacts-pvc
+            mountPath: /mnt/fraud-artifacts
+        exec-model-training:
+          pvcMount:
+          - constant: fraud-artifacts-pvc
+            mountPath: /mnt/fraud-artifacts

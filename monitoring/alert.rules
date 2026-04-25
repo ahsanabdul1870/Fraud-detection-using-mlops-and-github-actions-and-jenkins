@@ -1,0 +1,43 @@
+groups:
+- name: ML_System_Alerts
+  rules:
+  # System Health Alert
+  - alert: HighAPILatency
+    expr: rate(api_request_latency_seconds_sum[5m]) / rate(api_request_latency_seconds_count[5m]) > 0.5
+    for: 1m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High API Latency on {{ $labels.instance }}"
+      description: "API latency is above 0.5 seconds for more than 1 minute."
+
+  # System Health Alert
+  - alert: HighErrorRate
+    expr: rate(api_requests_total{status=~"5.."}[5m]) / rate(api_requests_total[5m]) > 0.05
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "High 5xx Error Rate on {{ $labels.instance }}"
+      description: "Error rate is above 5% for more than 1 minute."
+
+  # Model Performance Alert (Recall proxy / Sudden drop in fraud detection rate)
+  - alert: LowFraudDetectionRate
+    expr: rate(model_predictions_total{prediction_class="fraud"}[15m]) / rate(model_predictions_total[15m]) < 0.01
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Low Fraud Detection Rate"
+      description: "The proportion of transactions classified as fraud has dropped below 1% in the last 15 minutes. This may indicate a drop in recall."
+
+  # Data Drift Alert
+  - alert: DataDriftDetected
+    expr: data_drift_alert > 0
+    for: 1m
+    labels:
+      severity: critical
+      trigger_retraining: "true"
+    annotations:
+      summary: "Data Drift Detected"
+      description: "Data drift indicator is active. The CI/CD pipeline should be triggered for retraining."

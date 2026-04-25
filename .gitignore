@@ -1,4 +1,25 @@
+# Environments
 venv/
-*.docx
-*.odt
-i221870_B/
+.env
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Heavy Data (DO NOT UPLOAD)
+data/
+*.csv
+
+# MLflow and Pipeline Artifacts (DO NOT UPLOAD)
+fraud-artifacts/
+mlruns/
+*.pkl
+
+# Logs
+*.log
+
+# Old CICD folder (we moved it to .github/)
+cicd/
+
+# Temporary files
+.DS_Store
